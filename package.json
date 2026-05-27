@@ -9,6 +9,8 @@
     "check": "node src/utils/startupChecks.js",
     "init-db": "node src/scripts/initDB.js",
     "migrate": "node src/scripts/migrate.js",
+    "migrate:rollback": "node src/scripts/migrate-rollback.js",
+    "migrate:status": "node src/scripts/migrate-status.js",
     "migrate:memo": "node src/scripts/addMemoColumn.js",
     "migrate:currency": "node src/scripts/migrations/addCurrencyColumns.js",
     "test": "jest",

@@ -97,6 +97,7 @@ const { VALID_FREQUENCIES, SCHEDULE_STATUS } = require('../constants');
 const { validateRequiredFields, validateFloat, validateEnum } = require('../utils/validationHelpers');
 const log = require('../utils/log');
 const { validateSchema } = require('../middleware/schemaValidation');
+const { isValidStellarPublicKey } = require('../utils/validators');
 const SseManager = require('../services/SseManager');
 const donationEvents = require('../events/donationEvents');
 const { payloadSizeLimiter, ENDPOINT_LIMITS } = require('../middleware/payloadSizeLimiter');
@@ -112,6 +113,9 @@ const streamCreateSchema = validateSchema({
         trim: true,
         minLength: 1,
         maxLength: 255,
+        validate: (value) => isValidStellarPublicKey(value)
+          ? true
+          : 'donorPublicKey must be a valid Stellar public key (56-character Ed25519 public key starting with G)',
       },
       recipientPublicKey: {
         type: 'string',
@@ -119,6 +123,9 @@ const streamCreateSchema = validateSchema({
         trim: true,
         minLength: 1,
         maxLength: 255,
+        validate: (value) => isValidStellarPublicKey(value)
+          ? true
+          : 'recipientPublicKey must be a valid Stellar public key (56-character Ed25519 public key starting with G)',
       },
       amount: { type: 'number', required: true, min: 0.0000001 },
       frequency: {

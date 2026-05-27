@@ -180,6 +180,7 @@ const { PERMISSIONS } = require('../utils/permissions');
 const { ValidationError, ERROR_CODES } = require('../utils/errors');
 const log = require('../utils/log');
 const { donationRateLimiter, verificationRateLimiter, batchRateLimiter } = require('../middleware/rateLimiter');
+const perKeyRateLimit = require('../middleware/perKeyRateLimit');
 const { validateRequiredFields, validateFloat, validateInteger } = require('../utils/validationHelpers');
 const { validateSchema } = require('../middleware/schemaValidation');
 const { TRANSACTION_STATES } = require('../utils/transactionStateMachine');
@@ -198,6 +199,7 @@ const Transaction = require('./models/transaction');
 const donationValidator = require('../utils/donationValidator');
 const { buildErrorResponse } = require('../utils/validationErrorFormatter');
 const donationEvents = require('../events/donationEvents');
+const { isValidStellarPublicKey } = require('../utils/validators');
 
 const donationService = new DonationService(getStellarService());
 
@@ -435,7 +437,19 @@ const createDonationSchema = validateSchema({
           return true;
         }
       },
-      recipient: { type: 'string', required: true, trim: true, minLength: 1 },
+      recipient: {
+        type: 'string',
+        required: true,
+        trim: true,
+        minLength: 1,
+        validate: (value) => {
+          // Allow federation addresses (e.g. alice*example.com) to pass through
+          if (typeof value === 'string' && value.includes('*')) return true;
+          return isValidStellarPublicKey(value)
+            ? true
+            : 'address must be a valid Stellar public key (56-character Ed25519 public key starting with G)';
+        },
+      },
       currency: { type: 'string', required: false, nullable: true },
       donor: { type: 'string', required: false, nullable: true },
       memo: { type: 'string', required: false, maxLength: 28, nullable: true },
@@ -464,7 +478,7 @@ const createDonationSchema = validateSchema({
  * POST /donations
  * Create a non-custodial donation record
  */
-router.post('/', payloadSizeLimiter(ENDPOINT_LIMITS.singleDonation), donationRateLimiter, requireApiKey, requireIdempotency, createDonationSchema, async (req, res, next) => {
+router.post('/', payloadSizeLimiter(ENDPOINT_LIMITS.singleDonation), donationRateLimiter, perKeyRateLimit, requireApiKey, requireIdempotency, createDonationSchema, async (req, res, next) => {
   try {
     const { amount, currency, donor, recipient, memo, memoType, notes, tags, sourceAsset, sourceAmount } = req.body;
 

@@ -33,6 +33,12 @@ const AuditLogService = require('../services/AuditLogService');
 const donationRateLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
+  keyGenerator: (req) => {
+    if (req.apiKey && req.apiKey.id && !req.apiKey.isLegacy) {
+      return `key:${req.apiKey.id}`;
+    }
+    return `ip:${req.ip}`;
+  },
   message: {
     success: false,
     error: {

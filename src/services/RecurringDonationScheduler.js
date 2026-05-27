@@ -27,6 +27,7 @@ const {
   recurringDonationsExecutionDuration,
   recurringDonationsSuspendedTotal,
   recurringDonationsActiveCount,
+  recurringDonationsSkippedTotal,
 } = require('../utils/metrics');
 const {
   withBackgroundContext,
@@ -278,8 +279,19 @@ class RecurringDonationScheduler {
         // Track how many schedules are due this tick
         recurringDonationsDueTotal.inc(dueSchedules.length);
 
-        const promises = dueSchedules
-          .filter((schedule) => !this.executingSchedules.has(schedule.id))
+        // Separate schedules already in-flight (duplicate-execution guard)
+        const toExecute = dueSchedules.filter(s => !this.executingSchedules.has(s.id));
+        const skippedCount = dueSchedules.length - toExecute.length;
+        if (skippedCount > 0) {
+          recurringDonationsSkippedTotal.inc({ reason: 'in_progress' }, skippedCount);
+          log.warn('RECURRING_SCHEDULER', 'Skipped in-progress schedules', {
+            skippedCount,
+            correlationId,
+            traceId,
+          });
+        }
+
+        const promises = toExecute
           .map((schedule) => this.executeScheduleWithRetry(schedule));
 
         const results = await Promise.allSettled(promises);
@@ -891,3 +903,4 @@ const _instance = new RecurringDonationScheduler(_dummyStellarService);
 _instance.Class = RecurringDonationScheduler;
 module.exports = _instance;
 module.exports.Class = RecurringDonationScheduler;
+module.exports.RecurringDonationScheduler = RecurringDonationScheduler;

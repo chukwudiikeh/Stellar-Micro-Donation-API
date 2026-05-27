@@ -52,18 +52,80 @@ class DonationService {
   }
 
   /**
-   * Verify a donation transaction by hash
-   * @param {string} transactionHash - Stellar transaction hash
-   * @returns {Promise<Object>} Verification result
+   * Verify a donation transaction by hash.
+   *
+   * When a donationId is provided the method additionally validates that:
+   *  1. The submitted transactionHash matches the hash stored on the donation record.
+   *  2. The on-chain transaction amount matches the donation amount.
+   *  3. The on-chain sender (source) matches the donation's donor address.
+   *  4. The on-chain recipient (destination) matches the donation's recipient address.
+   *
+   * Any mismatch returns a specific error so callers know exactly what failed.
+   *
+   * @param {string}  transactionHash - Stellar transaction hash to verify on-chain
+   * @param {string}  [donationId]    - Internal donation ID to cross-check
+   * @returns {Promise<Object>} Verification result from Stellar network
+   * @throws {ValidationError}     If inputs are missing or mismatched
+   * @throws {NotFoundError}       If the donation record or on-chain transaction is not found
    */
-  async verifyTransaction(transactionHash, correlationId = null) {
+  async verifyTransaction(transactionHash, donationId) {
     if (!transactionHash) {
       throw new ValidationError('Transaction hash is required', null, ERROR_CODES.INVALID_REQUEST);
     }
 
-    // Set correlation ID on StellarService for this request
-    if (correlationId) {
-      this.stellarService.setCorrelationId(correlationId);
+    // When a donationId is supplied, cross-check before hitting the network
+    if (donationId) {
+      const donation = this.getDonationById(donationId);
+
+      // 1. Compare the submitted hash against the stored hash
+      const storedHash = donation.stellarTxId || donation.transactionHash || null;
+      if (storedHash && storedHash !== transactionHash) {
+        throw new ValidationError(
+          'Transaction hash does not match the donation record',
+          { donationId, storedHash, submittedHash: transactionHash },
+          'VERIFICATION_FAILED'
+        );
+      }
+
+      // 2. Fetch on-chain data and compare amount / parties
+      const result = await this.stellarService.verifyTransaction(transactionHash);
+      const onChain = result.transaction;
+
+      if (onChain) {
+        // Compare amount (tolerant of string/number and rounding to 7 decimals)
+        const onChainAmount = parseFloat(onChain.amount);
+        const donationAmount = parseFloat(donation.amount);
+        if (!isNaN(onChainAmount) && !isNaN(donationAmount)) {
+          const diff = Math.abs(onChainAmount - donationAmount);
+          if (diff > 0.0000001) {
+            throw new ValidationError(
+              `Transaction amount mismatch: on-chain ${onChainAmount}, donation record ${donationAmount}`,
+              { donationId, onChainAmount, donationAmount },
+              'VERIFICATION_FAILED'
+            );
+          }
+        }
+
+        // Compare sender (source)
+        if (onChain.source && donation.donor && onChain.source !== donation.donor) {
+          throw new ValidationError(
+            `Transaction sender mismatch: on-chain ${onChain.source}, donation record ${donation.donor}`,
+            { donationId, onChainSource: onChain.source, donationDonor: donation.donor },
+            'VERIFICATION_FAILED'
+          );
+        }
+
+        // Compare recipient (destination)
+        if (onChain.destination && donation.recipient && onChain.destination !== donation.recipient) {
+          throw new ValidationError(
+            `Transaction recipient mismatch: on-chain ${onChain.destination}, donation record ${donation.recipient}`,
+            { donationId, onChainDestination: onChain.destination, donationRecipient: donation.recipient },
+            'VERIFICATION_FAILED'
+          );
+        }
+      }
+
+      return result;
     }
 
     return await this.stellarService.verifyTransaction(transactionHash);

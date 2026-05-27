@@ -12,6 +12,7 @@
     "migrate:rollback": "node src/scripts/migrate-rollback.js",
     "migrate:status": "node src/scripts/migrate-status.js",
     "migrate:memo": "node src/scripts/addMemoColumn.js",
+    "migrate:reencrypt": "node src/scripts/reencrypt-memos.js",
     "migrate:currency": "node src/scripts/migrations/addCurrencyColumns.js",
     "test": "jest",
     "test:e2e": "jest --config jest.config.e2e.js",

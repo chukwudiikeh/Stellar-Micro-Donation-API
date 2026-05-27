@@ -144,6 +144,7 @@ const { PERMISSIONS } = require('../utils/permissions');
 const { payloadSizeLimiter, ENDPOINT_LIMITS } = require('../middleware/payloadSizeLimiter');
 const { validateSchema } = require('../middleware/schemaValidation');
 const asyncHandler = require('../utils/asyncHandler');
+const { validateDateRange } = require('../middleware/validation');
 
 const multiSigService = new MultiSigService(serviceContainer.getStellarService());
 
@@ -171,8 +172,12 @@ const transactionListQuerySchema = validateSchema({
       cursor: {
         type: 'string',
         required: false,
+        // Accept both legacy "timestamp_id" and new base64-JSON cursors (contain "=", "+", "/")
         validate: (value) => {
-          // Cursor format: timestamp_id
+          // Base64-JSON cursors are produced when date filters are active
+          const isBase64 = /^[A-Za-z0-9+/]+=*$/.test(value);
+          if (isBase64) return true;
+          // Legacy format: timestamp_id
           if (!value.includes('_')) {
             return 'cursor must be in format: timestamp_id';
           }
@@ -180,6 +185,17 @@ const transactionListQuerySchema = validateSchema({
           const parsed = parseInt(timestamp);
           return !isNaN(parsed) ? true : 'cursor timestamp must be a valid integer';
         },
+      },
+      startDate: {
+        type: 'string',
+        required: false,
+        // Date format/range validation is handled by validateDateRange middleware
+        // which returns INVALID_DATE_FORMAT (1004) and INVALID_DATE_RANGE codes
+      },
+      endDate: {
+        type: 'string',
+        required: false,
+        // Date format/range validation is handled by validateDateRange middleware
       },
     },
   },
@@ -223,15 +239,17 @@ function withStellarTxHash(tx) {
   };
 }
 
-router.get('/', checkPermission(PERMISSIONS.TRANSACTIONS_READ), transactionListQuerySchema, asyncHandler(async (req, res, next) => {
+router.get('/', checkPermission(PERMISSIONS.TRANSACTIONS_READ), transactionListQuerySchema, validateDateRange, asyncHandler(async (req, res, next) => {
   try {
-    const { limit = 20, offset, cursor } = req.query;
+    const { limit = 20, offset, cursor, startDate, endDate } = req.query;
 
     // Cursor-based pagination (preferred)
     if (cursor !== undefined) {
       const result = Transaction.getCursorPaginated({
         limit: parseInt(limit),
-        cursor: cursor || null
+        cursor: cursor || null,
+        startDate: startDate || undefined,
+        endDate: endDate || undefined,
       });
 
       return res.status(200).json({
@@ -240,8 +258,10 @@ router.get('/', checkPermission(PERMISSIONS.TRANSACTIONS_READ), transactionListQ
         pagination: {
           limit: parseInt(limit),
           nextCursor: result.nextCursor,
-          hasMore: result.hasMore
-        }
+          hasMore: result.hasMore,
+          ...(startDate && { startDate }),
+          ...(endDate && { endDate }),
+        },
       });
     }
 
@@ -264,7 +284,7 @@ router.get('/', checkPermission(PERMISSIONS.TRANSACTIONS_READ), transactionListQ
 
       const result = Transaction.getPaginated({
         limit: limitNum,
-        offset: offsetNum
+        offset: offsetNum,
       });
 
       // Add deprecation warning header
@@ -273,13 +293,15 @@ router.get('/', checkPermission(PERMISSIONS.TRANSACTIONS_READ), transactionListQ
       return res.status(200).json({
         success: true,
         data: result.data.map(withStellarTxHash),
-        pagination: result.pagination
+        pagination: result.pagination,
       });
     }
 
-    // Default: cursor-based pagination without cursor
+    // Default: cursor-based pagination (no cursor supplied, optional date filters)
     const result = Transaction.getCursorPaginated({
-      limit: parseInt(limit)
+      limit: parseInt(limit),
+      startDate: startDate || undefined,
+      endDate: endDate || undefined,
     });
 
     return res.status(200).json({
@@ -288,8 +310,10 @@ router.get('/', checkPermission(PERMISSIONS.TRANSACTIONS_READ), transactionListQ
       pagination: {
         limit: parseInt(limit),
         nextCursor: result.nextCursor,
-        hasMore: result.hasMore
-      }
+        hasMore: result.hasMore,
+        ...(startDate && { startDate }),
+        ...(endDate && { endDate }),
+      },
     });
 
   } catch (error) {

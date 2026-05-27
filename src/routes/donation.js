@@ -421,8 +421,6 @@ router.post('/batch', payloadSizeLimiter(ENDPOINT_LIMITS.batchDonation), batchRa
   }
 });
 
-const config = require('../config');
-
 const createDonationSchema = validateSchema({
   body: {
     fields: {
@@ -1205,28 +1203,64 @@ router.get('/recent', checkPermission(PERMISSIONS.DONATIONS_READ), asyncHandler(
 /**
  * POST /donations/verify
  * Verify a transaction on the Stellar blockchain.
- * Non-admin callers must provide their walletAddress and be the sender or recipient.
+ *
+ * Requires both transactionHash and donationId.
+ * The endpoint validates that the submitted hash matches the donation record
+ * and that the on-chain amount, sender, and recipient are consistent.
+ *
+ * Non-admin callers must also supply walletAddress to prove ownership.
  */
 router.post('/verify', verificationRateLimiter, checkPermission(PERMISSIONS.DONATIONS_READ), asyncHandler(async (req, res, next) => {
   try {
-    const { transactionHash, walletAddress } = req.body;
+    const { transactionHash, donationId, walletAddress } = req.body;
 
     if (!transactionHash) {
-      return res.status(400).json({ success: false, error: { code: 'MISSING_FIELD', message: 'transactionHash is required' } });
+      return res.status(400).json({
+        success: false,
+        error: { code: 'MISSING_FIELD', message: 'transactionHash is required' },
+      });
     }
 
-    const result = await donationService.verifyTransaction(transactionHash, req.id);
+    if (!donationId) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'MISSING_FIELD', message: 'donationId is required' },
+      });
+    }
+
+    let result;
+    try {
+      result = await donationService.verifyTransaction(transactionHash, donationId);
+    } catch (verifyError) {
+      // Surface VERIFICATION_FAILED errors as HTTP 422
+      if (verifyError.code === 'VERIFICATION_FAILED' || verifyError.errorCode === 'VERIFICATION_FAILED') {
+        return res.status(422).json({
+          success: false,
+          error: {
+            code: 'VERIFICATION_FAILED',
+            message: verifyError.message,
+          },
+        });
+      }
+      throw verifyError;
+    }
 
     // Admins can verify any transaction; non-admins must own it
     const isAdmin = req.user && req.user.role === 'admin';
     if (!isAdmin) {
       if (!walletAddress) {
-        return res.status(400).json({ success: false, error: { code: 'MISSING_FIELD', message: 'walletAddress is required' } });
+        return res.status(400).json({
+          success: false,
+          error: { code: 'MISSING_FIELD', message: 'walletAddress is required' },
+        });
       }
       const tx = result.transaction;
       const isOwner = tx && (tx.source === walletAddress || tx.destination === walletAddress);
       if (!isOwner) {
-        return res.status(403).json({ success: false, error: { code: 'FORBIDDEN', message: 'You are not authorized to verify this transaction' } });
+        return res.status(403).json({
+          success: false,
+          error: { code: 'FORBIDDEN', message: 'You are not authorized to verify this transaction' },
+        });
       }
     }
 

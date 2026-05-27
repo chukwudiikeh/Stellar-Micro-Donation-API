@@ -95,6 +95,7 @@ const { attachSubscriptionServer } = require('../graphql');
 const sseManager = require('../services/SseManager');
 const claimableBalancesRoutes = require('./claimableBalances');
 const { requestTimeout, TIMEOUTS } = require('../middleware/requestTimeout');
+const { healthCheckRateLimiter } = require('../middleware/rateLimiter');
 
 const app = express();
 
@@ -358,8 +359,29 @@ try {
 // Health check endpoints — available at both /health (unversioned) and /api/v1/health (versioned)
 const healthHandler = asyncHandler(async (req, res) => {
   try {
-    const health = await HealthCheckService.getFullHealth(stellarService, networkStatusService, recurringDonationScheduler);
-    const stellarConfig = require('../config/stellar');
+    // Issue #889: Check for verbose mode (admin only)
+    const isAdmin = req.apiKey?.role === 'admin' || req.user?.role === 'admin';
+    const verbose = req.query.verbose === 'true' && isAdmin;
+    
+    // In production, unauthenticated requests get minimal response
+    const isProduction = process.env.NODE_ENV === 'production';
+    const shouldMinimize = isProduction && !isAdmin;
+    
+    const health = await HealthCheckService.getFullHealth(
+      stellarService, 
+      networkStatusService, 
+      recurringDonationScheduler,
+      verbose && !shouldMinimize
+    );
+    
+    // Issue #889: Minimize response in production for unauthenticated requests
+    if (shouldMinimize) {
+      return res.status(health.status === 'healthy' ? 200 : 503).json({
+        status: health.status,
+        timestamp: health.timestamp
+      });
+    }
+    
     health.stellarEnvironment = stellarConfig.environment || 'testnet';
     health.stellarNetwork = stellarConfig.network || 'testnet';
     health.requestId = req.id;
@@ -377,17 +399,17 @@ const healthHandler = asyncHandler(async (req, res) => {
   }
 });
 
-app.get('/api/v1/health', healthHandler);
+app.get('/api/v1/health', healthCheckRateLimiter, healthHandler);
 
-app.get('/health', healthHandler);
+app.get('/health', healthCheckRateLimiter, healthHandler);
 
 // Liveness probe — returns 200 as long as the process is running
-app.get('/health/live', (req, res) => {
+app.get('/health/live', healthCheckRateLimiter, (req, res) => {
   return res.status(200).json(HealthCheckService.getLiveness());
 });
 
 // Readiness probe — returns 200 only when all dependencies are healthy
-app.get('/health/ready', asyncHandler(async (req, res) => {
+app.get('/health/ready', healthCheckRateLimiter, asyncHandler(async (req, res) => {
   try {
     const readiness = await HealthCheckService.getReadiness(stellarService, networkStatusService, recurringDonationScheduler);
     const httpStatus = readiness.ready ? 200 : 503;

@@ -13,6 +13,8 @@
 'use strict';
 
 const Database = require('./database');
+const fs = require('fs');
+const path = require('path');
 
 const STELLAR_TIMEOUT_MS = 5000;
 
@@ -113,6 +115,51 @@ async function checkStellarNetwork() {
   }
 }
 
+/** Check 5 — Database file and directory permissions (Issue #890) */
+function checkDatabasePermissions() {
+  const DATA_DIR = './data';
+  const DB_PATH = path.join(DATA_DIR, 'stellar_donations.db');
+
+  try {
+    // Check data directory permissions
+    if (fs.existsSync(DATA_DIR)) {
+      const dirStats = fs.statSync(DATA_DIR);
+      const dirMode = dirStats.mode & parseInt('777', 8);
+      
+      if (dirMode !== parseInt('700', 8)) {
+        warn(
+          'Database directory permissions',
+          `${DATA_DIR} has permissions ${(dirMode).toString(8)} (should be 700). ` +
+          'Run: chmod 700 data'
+        );
+      } else {
+        pass('Database directory permissions', `${DATA_DIR} is 0700 (owner only)`);
+      }
+    }
+
+    // Check database file permissions
+    if (fs.existsSync(DB_PATH)) {
+      const fileStats = fs.statSync(DB_PATH);
+      const fileMode = fileStats.mode & parseInt('777', 8);
+      
+      if (fileMode !== parseInt('600', 8)) {
+        warn(
+          'Database file permissions',
+          `${DB_PATH} has permissions ${(fileMode).toString(8)} (should be 600). ` +
+          'Run: chmod 600 data/stellar_donations.db'
+        );
+      } else {
+        pass('Database file permissions', `${DB_PATH} is 0600 (owner only)`);
+      }
+    }
+
+    return true;
+  } catch (err) {
+    warn('Database permissions check', err.message);
+    return true; // Don't fail on permission check errors
+  }
+}
+
 /**
  * Run all startup checks.
  *
@@ -128,6 +175,7 @@ async function run({ exitOnFailure = false } = {}) {
     checkApiKeys(),
     await checkDatabase(),
     await checkStellarNetwork(),
+    checkDatabasePermissions(),
   ];
 
   const passed = criticalResults.every(Boolean);

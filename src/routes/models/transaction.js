@@ -119,17 +119,65 @@ class Transaction {
   }
 
   /**
-   * Get paginated transactions using cursor-based pagination
-   * @param {Object} options - Pagination options
-   * @param {number} options.limit - Number of items per page (default: 20, max: 100)
-   * @param {string} options.cursor - Cursor for pagination (format: timestamp_id)
-   * @returns {Object} Paginated results with nextCursor and hasMore
+   * Get paginated transactions using cursor-based pagination with optional date filtering.
+   *
+   * When startDate or endDate are provided the results are filtered to only
+   * include transactions whose timestamp falls within the specified range.
+   * The date range is encoded in the cursor so subsequent pages automatically
+   * apply the same filter without the caller needing to repeat the parameters.
+   *
+   * Cursor format (no date filter):  "<epochMs>_<id>"
+   * Cursor format (with date filter): base64(JSON { t, id, sd?, ed? })
+   *
+   * @param {Object}  options
+   * @param {number}  [options.limit=20]    - Items per page (max 100)
+   * @param {string}  [options.cursor=null] - Opaque pagination cursor
+   * @param {string}  [options.startDate]   - ISO 8601 start of date range (inclusive)
+   * @param {string}  [options.endDate]     - ISO 8601 end of date range (inclusive)
+   * @returns {{ data: Array, nextCursor: string|null, hasMore: boolean }}
    */
-  static getCursorPaginated({ limit = 20, cursor = null } = {}) {
+  static getCursorPaginated({ limit = 20, cursor = null, startDate, endDate } = {}) {
     const transactions = this.loadTransactions();
-    
+
+    // Decode cursor — may carry embedded date range
+    let cursorTime = null;
+    let cursorId = null;
+    let effectiveStartDate = startDate;
+    let effectiveEndDate = endDate;
+
+    if (cursor) {
+      // Try new base64-JSON format first (used when date filters are active)
+      try {
+        const decoded = JSON.parse(Buffer.from(cursor, 'base64').toString('utf8'));
+        if (decoded && typeof decoded.t === 'number') {
+          cursorTime = decoded.t;
+          cursorId = decoded.id;
+          // Restore encoded date range so it applies on every page
+          if (decoded.sd) effectiveStartDate = decoded.sd;
+          if (decoded.ed) effectiveEndDate = decoded.ed;
+        }
+      } catch {
+        // Fall back to legacy "timestamp_id" format
+        const parts = cursor.split('_');
+        if (parts.length >= 2) {
+          cursorTime = parseInt(parts[0]);
+          cursorId = parts.slice(1).join('_');
+        }
+      }
+    }
+
     // Exclude soft-deleted records
-    const active = transactions.filter(t => !t.deleted_at);
+    let active = transactions.filter(t => !t.deleted_at);
+
+    // Apply date range filter at the data level (equivalent to SQL WHERE timestamp BETWEEN)
+    if (effectiveStartDate) {
+      const start = new Date(effectiveStartDate).getTime();
+      active = active.filter(t => new Date(t.timestamp).getTime() >= start);
+    }
+    if (effectiveEndDate) {
+      const end = new Date(effectiveEndDate).getTime();
+      active = active.filter(t => new Date(t.timestamp).getTime() <= end);
+    }
 
     // Sort by timestamp DESC, then by id DESC for consistent ordering
     const sorted = active.sort((a, b) => {
@@ -140,47 +188,45 @@ class Transaction {
     });
 
     let startIndex = 0;
-    
-    // If cursor provided, find the starting position
-    if (cursor) {
-      const [cursorTimestamp, cursorId] = cursor.split('_');
-      const cursorTime = parseInt(cursorTimestamp);
-      
+
+    // If cursor provided, find the starting position within the (filtered) sorted list
+    if (cursorTime !== null && cursorId !== null) {
       startIndex = sorted.findIndex(t => {
         const txTime = new Date(t.timestamp).getTime();
         return txTime < cursorTime || (txTime === cursorTime && t.id.localeCompare(cursorId) < 0);
       });
-      
+
       // If cursor not found, return empty results
       if (startIndex === -1) {
-        return {
-          data: [],
-          nextCursor: null,
-          hasMore: false
-        };
+        return { data: [], nextCursor: null, hasMore: false };
       }
     }
 
     // Get the page of results
     const pageLimit = Math.min(parseInt(limit), 100);
     const paginatedData = sorted.slice(startIndex, startIndex + pageLimit);
-    
+
     // Check if there are more results
     const hasMore = startIndex + pageLimit < sorted.length;
-    
-    // Generate next cursor from the last item
+
+    // Generate next cursor from the last item, embedding the date range when present
     let nextCursor = null;
     if (hasMore && paginatedData.length > 0) {
       const lastItem = paginatedData[paginatedData.length - 1];
       const lastTimestamp = new Date(lastItem.timestamp).getTime();
-      nextCursor = `${lastTimestamp}_${lastItem.id}`;
+
+      if (effectiveStartDate || effectiveEndDate) {
+        // Encode date range into cursor so next page uses the same filter
+        const cursorPayload = { t: lastTimestamp, id: lastItem.id };
+        if (effectiveStartDate) cursorPayload.sd = effectiveStartDate;
+        if (effectiveEndDate) cursorPayload.ed = effectiveEndDate;
+        nextCursor = Buffer.from(JSON.stringify(cursorPayload)).toString('base64');
+      } else {
+        nextCursor = `${lastTimestamp}_${lastItem.id}`;
+      }
     }
 
-    return {
-      data: paginatedData,
-      nextCursor,
-      hasMore
-    };
+    return { data: paginatedData, nextCursor, hasMore };
   }
 
   static getById(id) {

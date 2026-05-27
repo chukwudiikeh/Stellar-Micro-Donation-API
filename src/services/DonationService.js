@@ -12,6 +12,7 @@
 const Database = require('../utils/database');
 const Transaction = require('../routes/models/transaction');
 const encryption = require('../utils/encryption');
+const { STROOPS_PER_XLM } = require('../constants');
 const donationValidator = require('../utils/donationValidator');
 const memoValidator = require('../utils/memoValidator');
 const { calculateAnalyticsFee } = require('../utils/feeCalculator');
@@ -278,10 +279,11 @@ class DonationService {
       ledger: stellarResult.ledger
     });
 
-    // Record in database with sanitized memo
+    // Record in database with sanitized memo — amount stored as integer stroops
+    const amountStroops = Math.round(parseFloat(amount) * STROOPS_PER_XLM);
     const dbResult = await Database.run(
       'INSERT INTO transactions (senderId, receiverId, amount, memo, notes, tags, timestamp, idempotencyKey, stellar_tx_id) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)',
-      [senderId, receiverId, amount, sanitizedMemo, notes || null, JSON.stringify(tags || []), idempotencyKey, stellarResult.transactionId]
+      [senderId, receiverId, amountStroops, sanitizedMemo, notes || null, JSON.stringify(tags || []), idempotencyKey, stellarResult.transactionId]
     );
 
     // Emit donation.created to trigger cache invalidation and other listeners (non-blocking)

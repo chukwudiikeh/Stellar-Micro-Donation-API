@@ -24,6 +24,8 @@ const { cacheMiddleware } = require('../middleware/caching');
 const { validateDataEntry } = require('../middleware/validateDataEntry');
 const { toWalletResponse } = require('../utils/responseSanitizer');
 const BulkWalletImportService = require('../services/BulkWalletImportService');
+const Wallet = require('./models/wallet');
+const { STROOPS_PER_XLM } = require('../constants');
 
 const requireAuth = requireAdmin;
 const requirePermission = (perm) => checkPermission(perm);
@@ -744,12 +746,12 @@ router.get('/:publicKey/transactions', checkPermission(PERMISSIONS.WALLETS_READ)
     // Get transactions
     const transactions = await Database.query(query, params);
 
-    // Format the response
+    // Format the response — convert stored stroops back to XLM for output
     const formattedTransactions = transactions.map(tx => ({
       id: tx.id,
       sender: tx.senderPublicKey,
       receiver: tx.receiverPublicKey,
-      amount: tx.amount,
+      amount: (tx.amount / STROOPS_PER_XLM).toFixed(7),
       memo: tx.memo,
       timestamp: tx.timestamp
     }));
@@ -1657,18 +1659,40 @@ router.get('/:id/trustlines', checkPermission(PERMISSIONS.WALLETS_READ), trustli
 // ─────────────────────────────────────────────────────────────────────────────
 
 const multer = require('multer');
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+const { parse: parseCsvSync } = require('csv-parse/sync');
+const StellarSdkBulk = require('stellar-sdk');
+
+const BULK_IMPORT_MAX_BYTES = parseInt(process.env.BULK_IMPORT_MAX_SIZE_BYTES || (1 * 1024 * 1024), 10);
+const bulkUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: BULK_IMPORT_MAX_BYTES },
+});
 
 /**
- * @route   POST /wallets/bulk-import
- * @desc    Bulk import wallets from a CSV or JSON file (multipart/form-data, field: "file").
- *          Atomically inserts all rows or rolls back on any failure.
- * @access  wallets:create
+ * POST /wallets/bulk-import
+ * Bulk import wallet addresses from a CSV file (multipart/form-data, field: "file").
+ * CSV must have a header row: address,label,ownerName (label and ownerName are optional).
+ * Each row is validated independently — invalid rows are counted as failed, duplicates as skipped.
+ * Requires admin role.
  */
 router.post(
   '/bulk-import',
-  checkPermission(PERMISSIONS.WALLETS_CREATE),
-  upload.single('file'),
+  requireAdmin(),
+  (req, res, next) => {
+    bulkUpload.single('file')(req, res, (err) => {
+      if (err && err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({
+          success: false,
+          error: {
+            code: 'FILE_TOO_LARGE',
+            message: `File exceeds the maximum allowed size of ${BULK_IMPORT_MAX_BYTES} bytes`,
+          },
+        });
+      }
+      if (err) return next(err);
+      next();
+    });
+  },
   asyncHandler(async (req, res, next) => {
     try {
       if (!req.file) {
@@ -1678,39 +1702,82 @@ router.post(
         });
       }
 
-      const mimeType = req.file.mimetype;
-      const service = new BulkWalletImportService();
-
-      let result;
+      let rows;
       try {
-        result = service.importFile(req.file.buffer, mimeType);
-      } catch (err) {
-        if (err.code === 'ROW_LIMIT_EXCEEDED') {
-          return res.status(400).json({
-            success: false,
-            error: { code: 'ROW_LIMIT_EXCEEDED', message: err.message, limit: err.limit },
-          });
-        }
-        if (err.code === 'VALIDATION_FAILED') {
-          return res.status(400).json({
-            success: false,
-            error: { code: 'VALIDATION_FAILED', message: err.message, details: err.details },
-          });
-        }
-        if (err.code === 'INSERT_FAILED') {
-          return res.status(400).json({
-            success: false,
-            error: { code: 'INSERT_FAILED', message: err.message },
-          });
-        }
-        // Unsupported type or parse error
+        rows = parseCsvSync(req.file.buffer, {
+          columns: true,
+          skip_empty_lines: true,
+          trim: true,
+        });
+      } catch (parseErr) {
         return res.status(400).json({
           success: false,
-          error: { code: 'PARSE_ERROR', message: err.message },
+          error: { code: 'PARSE_ERROR', message: `CSV parse error: ${parseErr.message}` },
         });
       }
 
-      return res.status(201).json({ success: true, data: result });
+      if (rows.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'EMPTY_FILE', message: 'CSV file contains no data rows' },
+        });
+      }
+
+      if (!Object.prototype.hasOwnProperty.call(rows[0], 'address')) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'INVALID_HEADER',
+            message: 'CSV must have a header row with at least an "address" column',
+          },
+        });
+      }
+
+      let imported = 0;
+      let skipped = 0;
+      let failed = 0;
+      const errors = [];
+
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const rowNum = i + 2; // row 1 is the header
+        const address = (row.address || '').trim();
+
+        if (!address) {
+          failed++;
+          errors.push({ row: rowNum, address: '', reason: 'Missing address' });
+          continue;
+        }
+
+        if (!StellarSdkBulk.StrKey.isValidEd25519PublicKey(address)) {
+          failed++;
+          errors.push({ row: rowNum, address, reason: 'Invalid Stellar public key' });
+          continue;
+        }
+
+        const existing = Wallet.getByAddress(address);
+        if (existing) {
+          skipped++;
+          continue;
+        }
+
+        try {
+          Wallet.create({
+            address,
+            label: row.label || null,
+            ownerName: row.ownerName || null,
+          });
+          imported++;
+        } catch (createErr) {
+          failed++;
+          errors.push({ row: rowNum, address, reason: createErr.message });
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        data: { imported, skipped, failed, errors },
+      });
     } catch (error) {
       next(error);
     }

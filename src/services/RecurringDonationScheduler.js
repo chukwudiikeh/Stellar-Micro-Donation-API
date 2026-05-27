@@ -18,7 +18,7 @@
 const Database = require('../utils/database');
 const WebhookService = require('./WebhookService');
 const ApiKeyExpirationNotifier = require('./ApiKeyExpirationNotifier');
-const { SCHEDULE_STATUS, DONATION_FREQUENCIES } = require('../constants');
+const { SCHEDULE_STATUS, DONATION_FREQUENCIES, STROOPS_PER_XLM } = require('../constants');
 const log = require('../utils/log');
 const { revokeExpiredDeprecatedKeys } = require('../models/apiKeys');
 const {
@@ -493,14 +493,14 @@ class RecurringDonationScheduler {
             `Recurring donation (Schedule #${schedule.id})`
           );
 
-          // 3. Record transaction with idempotency key as memo
+          // 3. Record transaction with idempotency key as memo — amount stored as integer stroops
           await Database.run(
             `INSERT INTO transactions (senderId, receiverId, amount, memo, timestamp)
              VALUES (?, ?, ?, ?, ?)`,
             [
               schedule.donorId,
               schedule.recipientId,
-              schedule.amount,
+              Math.round(parseFloat(schedule.amount) * STROOPS_PER_XLM),
               idempotencyKey,
               new Date().toISOString(),
             ]

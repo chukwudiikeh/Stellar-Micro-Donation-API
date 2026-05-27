@@ -26,6 +26,9 @@ const PERIOD_MS = {
   '30d': 30 * 24 * 60 * 60 * 1000,
 };
 
+const VALID_SORT_FIELDS = ['requestCount', 'errorRate', 'lastUsedAt'];
+const DEFAULT_PAGE_SIZE = 20;
+
 /**
  * GET /admin/api-keys/usage
  */
@@ -38,6 +41,17 @@ router.get('/', requireApiKey, requireAdmin(), async (req, res) => {
         error: `Invalid period. Must be one of: ${Object.keys(PERIOD_MS).join(', ')}`,
       });
     }
+
+    const sortBy = req.query.sortBy || 'requestCount';
+    if (!VALID_SORT_FIELDS.includes(sortBy)) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid sortBy. Must be one of: ${VALID_SORT_FIELDS.join(', ')}`,
+      });
+    }
+
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || DEFAULT_PAGE_SIZE));
 
     const now = Date.now();
     const from = now - PERIOD_MS[period];
@@ -86,6 +100,10 @@ router.get('/', requireApiKey, requireAdmin(), async (req, res) => {
         ? Math.round((errorCount / requestCount) * 10000) / 100
         : 0;
 
+      const lastUsedAtIso = lastUsedAt
+        ? new Date(lastUsedAt).toISOString()
+        : (key.last_used_at ? new Date(key.last_used_at).toISOString() : null);
+
       return {
         keyId: key.id,
         keyName: key.name,
@@ -95,12 +113,30 @@ router.get('/', requireApiKey, requireAdmin(), async (req, res) => {
         requestCount,
         errorCount,
         errorRate,
-        lastUsedAt: lastUsedAt ? new Date(lastUsedAt).toISOString() : (key.last_used_at ? new Date(key.last_used_at).toISOString() : null),
+        lastUsedAt: lastUsedAtIso,
         topEndpoints,
         createdAt: key.created_at ? new Date(key.created_at).toISOString() : null,
         expiresAt: key.expires_at ? new Date(key.expires_at).toISOString() : null,
       };
     });
+
+    // Sort
+    result.sort((a, b) => {
+      if (sortBy === 'requestCount') return b.requestCount - a.requestCount;
+      if (sortBy === 'errorRate') return b.errorRate - a.errorRate;
+      if (sortBy === 'lastUsedAt') {
+        const aMs = a.lastUsedAt ? new Date(a.lastUsedAt).getTime() : 0;
+        const bMs = b.lastUsedAt ? new Date(b.lastUsedAt).getTime() : 0;
+        return bMs - aMs;
+      }
+      return 0;
+    });
+
+    // Paginate
+    const totalKeys = result.length;
+    const totalPages = Math.ceil(totalKeys / pageSize) || 1;
+    const offset = (page - 1) * pageSize;
+    const paginatedKeys = result.slice(offset, offset + pageSize);
 
     return res.json({
       success: true,
@@ -108,7 +144,16 @@ router.get('/', requireApiKey, requireAdmin(), async (req, res) => {
         period,
         from: new Date(from).toISOString(),
         to: new Date(now).toISOString(),
-        keys: result,
+        sortBy,
+        keys: paginatedKeys,
+        pagination: {
+          page,
+          pageSize,
+          totalKeys,
+          totalPages,
+          hasNextPage: page < totalPages,
+          hasPrevPage: page > 1,
+        },
       },
     });
   } catch (err) {

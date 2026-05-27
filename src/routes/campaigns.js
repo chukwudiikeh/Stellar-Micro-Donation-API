@@ -15,6 +15,7 @@ const { PERMISSIONS } = require('../utils/permissions');
 const { validateSchema } = require('../middleware/schemaValidation');
 const { validateFloat } = require('../utils/validationHelpers');
 const { cacheMiddleware } = require('../middleware/caching');
+const { STROOPS_PER_XLM } = require('../constants');
 
 const createCampaignSchema = validateSchema({
   body: {
@@ -185,7 +186,11 @@ router.get('/:id/donations', asyncHandler(async (req, res, next) => {
       [id]
     );
 
-    res.status(200).json({ success: true, count: transactions.length, data: transactions });
+    const txData = transactions.map(tx => ({
+      ...tx,
+      amount: (tx.amount / STROOPS_PER_XLM).toFixed(7),
+    }));
+    res.status(200).json({ success: true, count: txData.length, data: txData });
   } catch (error) {
     next(error);
   }

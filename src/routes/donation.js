@@ -554,6 +554,7 @@ router.post('/', payloadSizeLimiter(ENDPOINT_LIMITS.singleDonation), donationRat
       apiKeyId: req.apiKey ? req.apiKey.id : null,
       apiKeyRole: req.apiKey ? req.apiKey.role : (req.user?.role || 'user'),
       anonymous: anonymous === true,
+      correlationId: req.id,
     });
 
     // Estimate fee for informational purposes (non-blocking)
@@ -1017,7 +1018,16 @@ router.post('/batch', requireApiKey, batchRateLimiter, checkPermission(PERMISSIO
 
 /**
  * GET /donations
- * List all donations with optional pagination.
+ * List all donations with cursor-based pagination.
+ * Query params:
+ *   - limit: integer (default 20, max 100)
+ *   - cursor: opaque string for pagination
+ *   - sort: one of id:asc, id:desc, timestamp:asc, timestamp:desc, amount:asc, amount:desc
+ *   - status: comma-separated status values (pending, submitted, confirmed, failed)
+ *   - from: start date filter
+ *   - to: end date filter
+ *   - minAmount: minimum donation amount
+ *   - maxAmount: maximum donation amount
  */
 router.get('/', checkPermission(PERMISSIONS.DONATIONS_READ), asyncHandler(async (req, res, next) => {
   try {
@@ -1040,7 +1050,7 @@ router.get('/', checkPermission(PERMISSIONS.DONATIONS_READ), asyncHandler(async 
     // #766: parse filter params from query string
     const { status, from, to, minAmount, maxAmount } = req.query;
 
-    // Support comma-separated status values (e.g. ?status=pending,processing)
+    // Support comma-separated status values (e.g. ?status=pending,submitted)
     let statusFilter;
     if (status) {
       const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
@@ -1060,20 +1070,16 @@ router.get('/', checkPermission(PERMISSIONS.DONATIONS_READ), asyncHandler(async 
     const result = donationService.getPaginatedDonations(pagination, filters);
     res.setHeader('X-Total-Count', String(result.totalCount));
 
-    if (req.query.envelope === 'true') {
-      return res.json({
-        data: result.data,
-        pagination: {
-          total: result.totalCount,
-          limit: result.meta.limit,
-          hasMore: result.meta.next_cursor !== null,
-          next_cursor: result.meta.next_cursor,
-          prev_cursor: result.meta.prev_cursor,
-        },
-      });
-    }
-
-    res.json({ success: true, data: result.data, count: result.data.length, meta: result.meta });
+    // Return standard pagination response format
+    res.json({
+      success: true,
+      data: result.data,
+      pagination: {
+        nextCursor: result.meta.next_cursor,
+        hasMore: result.meta.next_cursor !== null,
+        total: result.totalCount,
+      },
+    });
   } catch (error) {
     next(error);
   }
@@ -1195,7 +1201,7 @@ router.post('/verify', verificationRateLimiter, checkPermission(PERMISSIONS.DONA
       return res.status(400).json({ success: false, error: { code: 'MISSING_FIELD', message: 'transactionHash is required' } });
     }
 
-    const result = await donationService.verifyTransaction(transactionHash);
+    const result = await donationService.verifyTransaction(transactionHash, req.id);
 
     // Admins can verify any transaction; non-admins must own it
     const isAdmin = req.user && req.user.role === 'admin';

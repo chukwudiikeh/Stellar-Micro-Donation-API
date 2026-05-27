@@ -165,6 +165,7 @@ class StellarService extends StellarServiceInterface {
     this.horizonUrl = config.horizonUrl || HORIZON_URLS.TESTNET;
     this.serviceSecretKey = config.serviceSecretKey;
     this.environment = config.environment;
+    this.correlationId = config.correlationId;
     
     // Default to SDK definitions if environment config is missing
     this.baseFee = this.environment?.baseFee || StellarSdk.BASE_FEE;
@@ -172,7 +173,9 @@ class StellarService extends StellarServiceInterface {
       (this.network === 'mainnet' || this.network === 'public' 
         ? StellarSdk.Networks.PUBLIC : StellarSdk.Networks.TESTNET);
 
-    this.server = new StellarSdk.Horizon.Server(this.horizonUrl);
+    this.server = new StellarSdk.Horizon.Server(this.horizonUrl, {
+      httpClient: this._createHttpClient(),
+    });
     
     // Timeout configuration
     this.timeouts = {
@@ -188,6 +191,47 @@ class StellarService extends StellarServiceInterface {
       cooldownMs: config.circuitBreakerCooldownMs ?? 30_000,
       name: 'horizon',
     });
+  }
+
+  /**
+   * Create HTTP client with correlation ID headers
+   * @private
+   * @returns {Object} HTTP client with correlation headers
+   */
+  _createHttpClient() {
+    const { generateCorrelationHeaders } = require('../utils/correlation');
+    const fetch = require('node-fetch');
+    
+    return {
+      async request(method, url, data, headers = {}) {
+        const correlationHeaders = generateCorrelationHeaders();
+        const mergedHeaders = {
+          ...headers,
+          ...correlationHeaders,
+          'X-Request-ID': this.correlationId || correlationHeaders['X-Correlation-ID'],
+        };
+        
+        const response = await fetch(url, {
+          method,
+          headers: mergedHeaders,
+          body: data ? JSON.stringify(data) : undefined,
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        return response.json();
+      }
+    };
+  }
+
+  /**
+   * Set correlation ID for this service instance
+   * @param {string} correlationId - Correlation ID to use for Stellar API calls
+   */
+  setCorrelationId(correlationId) {
+    this.correlationId = correlationId;
   }
 
   getNetwork() {

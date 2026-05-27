@@ -556,11 +556,14 @@ router.get('/schedules/:id', checkPermission(PERMISSIONS.STREAM_READ), streamSch
  * Accessible to the schedule owner and admins.
  *
  * Query params:
- *   page  {number} - 1-based page number (default 1)
- *   limit {number} - records per page (default 20, max 100)
+ *   limit  {number} - records per page (default 20, max 100)
+ *   cursor {string} - opaque cursor for pagination
+ *   status {string} - filter by status: 'success' or 'failed'
  */
 router.get('/schedules/:id/history', checkPermission(PERMISSIONS.STREAM_READ), streamScheduleIdSchema, asyncHandler(async (req, res) => {
   try {
+    const { parseCursorPaginationQuery } = require('../utils/pagination');
+    
     // Verify schedule exists and check ownership
     const schedule = await Database.get(
       `SELECT rd.id, donor.publicKey as donorPublicKey
@@ -584,31 +587,83 @@ router.get('/schedules/:id/history', checkPermission(PERMISSIONS.STREAM_READ), s
       });
     }
 
-    const page  = Math.max(1, parseInt(req.query.page, 10)  || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
-    const offset = (page - 1) * limit;
+    // Parse cursor pagination
+    const pagination = parseCursorPaginationQuery(req.query);
+    
+    // Parse status filter
+    const statusFilter = req.query.status;
+    if (statusFilter && !['success', 'failed'].includes(statusFilter)) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'INVALID_REQUEST', message: 'status must be "success" or "failed"' }
+      });
+    }
 
-    const [executions, countRow] = await Promise.all([
-      Database.query(
-        `SELECT id, executedAt, status, transactionHash, errorMessage
-         FROM recurring_donation_executions
-         WHERE scheduleId = ?
-         ORDER BY executedAt DESC
-         LIMIT ? OFFSET ?`,
-        [req.params.id, limit, offset]
-      ),
-      Database.get(
-        'SELECT COUNT(*) as total FROM recurring_donation_executions WHERE scheduleId = ?',
-        [req.params.id]
-      ),
-    ]);
+    // Build query with cursor-based pagination
+    let whereClause = 'WHERE scheduleId = ?';
+    let params = [req.params.id];
+    
+    if (statusFilter) {
+      whereClause += ' AND status = ?';
+      params.push(statusFilter);
+    }
 
-    const total = countRow ? countRow.total : 0;
+    // Get total count
+    const countRow = await Database.get(
+      `SELECT COUNT(*) as total FROM recurring_donation_executions ${whereClause}`,
+      params
+    );
+    const totalCount = countRow ? countRow.total : 0;
+
+    // Build cursor filter clause
+    let cursorClause = '';
+    let cursorParams = [];
+    if (pagination.cursor) {
+      // For descending order: id < cursor.id OR (id = cursor.id AND executedAt < cursor.timestamp)
+      cursorClause = ' AND (id < ? OR (id = ? AND executedAt < ?))';
+      cursorParams = [pagination.cursor.id, pagination.cursor.id, pagination.cursor.timestamp];
+    }
+
+    // Fetch one extra record to determine hasMore
+    const executions = await Database.query(
+      `SELECT id, executedAt, status, transactionHash, errorMessage, retryCount, durationMs
+       FROM recurring_donation_executions
+       ${whereClause}${cursorClause}
+       ORDER BY executedAt DESC, id DESC
+       LIMIT ?`,
+      [...params, ...cursorParams, pagination.limit + 1]
+    );
+
+    // Determine if there are more results
+    const hasMore = executions.length > pagination.limit;
+    const pageData = executions.slice(0, pagination.limit);
+
+    // Generate next cursor
+    let nextCursor = null;
+    if (hasMore && pageData.length > 0) {
+      const lastItem = pageData[pageData.length - 1];
+      nextCursor = Buffer.from(JSON.stringify({
+        id: lastItem.id,
+        timestamp: lastItem.executedAt
+      }), 'utf8').toString('base64url');
+    }
 
     res.json({
       success: true,
-      data: executions,
-      meta: { page, limit, total, totalPages: Math.ceil(total / limit) }
+      data: pageData.map(exec => ({
+        id: exec.id,
+        executedAt: exec.executedAt,
+        status: exec.status,
+        transactionHash: exec.transactionHash || null,
+        errorMessage: exec.errorMessage || null,
+        retryCount: exec.retryCount || 0,
+        durationMs: exec.durationMs || 0,
+      })),
+      pagination: {
+        nextCursor,
+        hasMore,
+        total: totalCount,
+      },
     });
   } catch (error) {
     log.error('STREAM_ROUTE', 'Failed to fetch schedule history', { error: error.message });

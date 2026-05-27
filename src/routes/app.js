@@ -37,6 +37,7 @@ const adminTracesRoutes = require('./admin/traces');
 const systemInfoRoutes = require('./admin/systemInfo');
 const retentionAdminRoutes = require('./admin/retention');
 const backupAdminRoutes = require('./admin/backup');
+const geoRulesAdminRoutes = require('./admin/geoRules');
 const encryptionAdminRoutes = require('./admin/encryption');
 const matchingProgramsAdminRoutes = require('./admin/matchingPrograms');
 const corporateMatchingAdminRoutes = require('./admin/corporateMatching');
@@ -120,6 +121,7 @@ let replayCleanupTimer = null;
 // Graceful shutdown state
 let isShuttingDown = false;
 let inFlightRequests = 0;
+const requestCounter = require('../utils/requestCounter');
 
 // In-flight request tracking and graceful shutdown rejection middleware
 app.use((req, res, next) => {
@@ -131,16 +133,18 @@ app.use((req, res, next) => {
       error: { code: 'SERVICE_UNAVAILABLE', message: 'Server is shutting down' }
     });
   }
-  
+
   inFlightRequests++;
+  requestCounter.increment();
   let handled = false;
   const decrement = () => {
     if (!handled) {
       handled = true;
       inFlightRequests--;
+      requestCounter.decrement();
     }
   };
-  
+
   res.on('finish', decrement);
   res.on('close', decrement);
   next();
@@ -277,7 +281,8 @@ apiV1.use('/transactions', transactionRoutes);
 apiV1.use('/', corporateMatchingRoutes);
 apiV1.use('/claimable-balances', claimableBalancesRoutes);
 apiV1.use('/liquidity-pools', require('./liquidity-pools'));
-apiV1.use('/api-keys', apiKeysRoutes);
+const { requireAdminTOTP } = require('../middleware/adminTOTP');
+apiV1.use('/api-keys', requireAdminTOTP(), apiKeysRoutes);
 apiV1.use('/api-keys', apiKeyUsageRoutes);
 
 // Exchange rates endpoint
@@ -407,24 +412,30 @@ app.get('/api/v1/health', healthCheckRateLimiter, healthHandler);
 
 app.get('/health', healthCheckRateLimiter, healthHandler);
 
-// Liveness probe — returns 200 as long as the process is running
-app.get('/health/live', healthCheckRateLimiter, (req, res) => {
+// Liveness probe — returns 200 as long as the process is running.
+// Excluded from rate limiting: Kubernetes calls this every few seconds per pod.
+app.get('/health/live', (req, res) => {
   return res.status(200).json(HealthCheckService.getLiveness());
 });
 
-// Readiness probe — returns 200 only when all dependencies are healthy
-app.get('/health/ready', healthCheckRateLimiter, asyncHandler(async (req, res) => {
+// Readiness probe — returns 200 only when all dependencies are healthy.
+// Excluded from rate limiting: Kubernetes calls this every few seconds per pod.
+app.get('/health/ready', asyncHandler(async (req, res) => {
+  if (isShuttingDown) {
+    return res.status(503).json({ status: 'not_ready', reason: 'server is shutting down' });
+  }
   try {
     const readiness = await HealthCheckService.getReadiness(stellarService, networkStatusService, recurringDonationScheduler);
-    const httpStatus = readiness.ready ? 200 : 503;
-    return res.status(httpStatus).json(readiness);
+    if (readiness.ready) {
+      return res.status(200).json({ status: 'ready', timestamp: readiness.timestamp });
+    }
+    const reason = readiness.status === 'unhealthy'
+      ? 'one or more critical dependencies are unavailable'
+      : `service is ${readiness.status}`;
+    return res.status(503).json({ status: 'not_ready', reason, timestamp: readiness.timestamp });
   } catch (err) {
     log.error('HEALTH', 'Readiness check failed', { error: err.message });
-    return res.status(503).json({
-      success: false,
-      ready: false,
-      error: { code: 'READINESS_CHECK_ERROR', message: 'Readiness check failed' }
-    });
+    return res.status(503).json({ status: 'not_ready', reason: 'readiness check failed' });
   }
 }));
 
@@ -480,17 +491,15 @@ app.get('/suspicious-patterns', require('../middleware/rbac').requireAdmin(), (r
   });
 });
 
-// Feature flags admin UI + API (issue #807)
-app.use('/admin/feature-flags', requireApiKey, featureFlagsAdminRoutes);
+// Geo-rules management (admin only)
+app.use('/admin/geo-rules', geoRulesAdminRoutes);
 
-// Circuit breaker admin endpoints (issue #736)
-app.use('/admin/circuit-breaker', requireApiKey, require('./admin/circuitBreaker'));
+// Backup / restore endpoints (admin only) — mounted at /admin so router defines /backup and /backups paths
+app.use('/admin', backupAdminRoutes);
 
-// System info endpoint (issue #803)
-app.use('/admin/system/info', requireApiKey, systemInfoRoutes);
-
-// Database monitoring admin endpoints
-app.use('/admin/db', requireApiKey, dbAdminRoutes);
+// TOTP 2FA admin routes (Issue #918)
+const totpAdminRoutes = require('./admin/totp');
+app.use('/admin/totp', requireApiKey, totpAdminRoutes);
 
 // Transaction inspection (admin only)
 app.use('/admin/inspect/xdr', require('../middleware/rbac').requireAdmin(), adminInspectRoutes);
@@ -726,6 +735,9 @@ async function startServer() {
         await WebhookService.WebhookService.initTable();
         await validateRBAC();
 
+        // Start audit log auto-flush timer
+        AuditLogService.startAutoFlush();
+
         // Only start background workers and jobs if not in test environment
         if (process.env.NODE_ENV !== 'test') {
           const stopQuotaResetJob = startQuotaResetJob();
@@ -873,6 +885,15 @@ async function startServer() {
           log.info("SHUTDOWN", "SQLite WAL checkpoint completed");
         } catch (err) {
           log.warn("SHUTDOWN", "Error checkpointing WAL", { error: err.message });
+        }
+
+        // Flush pending audit log entries before closing the database
+        try {
+          await AuditLogService.flush();
+          AuditLogService.stopAutoFlush();
+          log.info("SHUTDOWN", "Audit log buffer flushed");
+        } catch (err) {
+          log.error("SHUTDOWN", "Error flushing audit log buffer", { error: err.message });
         }
 
         await Database.close();

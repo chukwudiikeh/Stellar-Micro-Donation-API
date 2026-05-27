@@ -19,11 +19,12 @@ const { payloadSizeLimiter, ENDPOINT_LIMITS } = require('../middleware/payloadSi
  */
 router.post('/', requireApiKey, payloadSizeLimiter(ENDPOINT_LIMITS.webhook), asyncHandler(async (req, res, next) => {
   try {
-    const { url, events, secret } = req.body;
+    const { url, events, secret, tlsSkipVerify } = req.body;
     const webhook = await WebhookService.register({
       url,
       events,
       secret,
+      tlsSkipVerify: !!tlsSkipVerify,
       apiKeyId: req.apiKeyId || null,
     });
     res.status(201).json({ success: true, data: webhook });

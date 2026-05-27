@@ -103,20 +103,36 @@ class WebhookService {
    * @param {string} [params.ownerEmail]
    * @returns {Promise<Object>}
    */
-  async register({ url, events, secret, apiKeyId = null, ownerEmail = null }) {
+  async register({ url, events, secret, apiKeyId = null, ownerEmail = null, tlsSkipVerify = false }) {
     if (!url) { const e = new Error('url is required'); e.status = 400; throw e; }
     if (!events || events.length === 0) { const e = new Error('events must be a non-empty array'); e.status = 400; throw e; }
-    try { new URL(url); } catch { const e = new Error('Invalid webhook URL'); e.status = 400; throw e; }
+
+    let parsedUrl;
+    try { parsedUrl = new URL(url); } catch { const e = new Error('Invalid webhook URL'); e.status = 400; throw e; }
+
+    // Enforce HTTPS — allow http://localhost and http://127.0.0.1 in development only
+    if (parsedUrl.protocol !== 'https:') {
+      const isLocalhost = parsedUrl.hostname === 'localhost' || parsedUrl.hostname === '127.0.0.1';
+      const isDev = process.env.NODE_ENV !== 'production';
+      if (!(isLocalhost && isDev)) {
+        const e = new Error('Webhook URL must use HTTPS'); e.status = 400; throw e;
+      }
+    }
+
+    // tlsSkipVerify is not allowed in production
+    if (tlsSkipVerify && process.env.NODE_ENV === 'production') {
+      const e = new Error('tlsSkipVerify is not allowed in production'); e.status = 400; throw e;
+    }
 
     const resolvedSecret = secret || crypto.randomBytes(20).toString('hex');
     const eventsStr = JSON.stringify(events);
 
     const Database = require('../utils/database');
     const result = await Database.run(
-      `INSERT INTO webhooks (url, events, secret, api_key_id, owner_email) VALUES (?, ?, ?, ?, ?)`,
-      [url, eventsStr, resolvedSecret, apiKeyId, ownerEmail]
+      `INSERT INTO webhooks (url, events, secret, api_key_id, owner_email, tls_skip_verify) VALUES (?, ?, ?, ?, ?, ?)`,
+      [url, eventsStr, resolvedSecret, apiKeyId, ownerEmail, tlsSkipVerify ? 1 : 0]
     );
-    return { id: result.id, url, events, secret: resolvedSecret, isActive: true, ownerEmail };
+    return { id: result.id, url, events, secret: resolvedSecret, isActive: true, ownerEmail, tlsSkipVerify: !!tlsSkipVerify };
   }
 
   /**
@@ -446,7 +462,7 @@ class WebhookService {
     const signature = WebhookService._sign(body, webhook.secret || '');
 
     try {
-      const result = await WebhookService._httpPost(webhook.url, body, signature, correlationHeaders);
+      const result = await WebhookService._httpPost(webhook.url, body, signature, correlationHeaders, !!webhook.tls_skip_verify);
       
       // Log successful delivery
       const Database = require('../utils/database');
@@ -503,7 +519,7 @@ class WebhookService {
    * POST a JSON body to a URL with a timeout.
    * @private
    */
-  _httpPost(url, body, signature, correlationHeaders = {}) {
+  _httpPost(url, body, signature, correlationHeaders = {}, tlsSkipVerify = false) {
     return new Promise((resolve, reject) => {
       const parsed = new URL(url);
       const lib = parsed.protocol === 'https:' ? https : http;
@@ -519,6 +535,8 @@ class WebhookService {
           'X-Webhook-Signature': `sha256=${signature}`,
           ...correlationHeaders,
         },
+        // Explicitly enforce TLS verification regardless of NODE_TLS_REJECT_UNAUTHORIZED
+        rejectUnauthorized: !tlsSkipVerify,
         timeout: 10000,
       };
 

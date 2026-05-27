@@ -43,10 +43,20 @@ const walletPublicKeySchema = validateSchema({
   }
 });
 
+const { isValidStellarPublicKey } = require('../utils/validators');
+
 const walletCreateSchema = validateSchema({
   body: {
     fields: {
-      address: { type: 'string', required: true, trim: true, minLength: 1 },
+      address: {
+        type: 'string',
+        required: true,
+        trim: true,
+        minLength: 1,
+        validate: (value) => isValidStellarPublicKey(value)
+          ? true
+          : 'address must be a valid Stellar public key (56-character Ed25519 public key starting with G)',
+      },
       label: { type: 'string', required: false, nullable: true },
       ownerName: { type: 'string', required: false, nullable: true },
       sponsored: { type: 'boolean', required: false, nullable: true }

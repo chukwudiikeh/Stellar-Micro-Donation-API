@@ -13,6 +13,8 @@
 'use strict';
 
 const Database = require('./database');
+const fs = require('fs');
+const path = require('path');
 
 const STELLAR_TIMEOUT_MS = 5000;
 
@@ -86,7 +88,43 @@ async function checkDatabase() {
   }
 }
 
-/** Check 4 — Stellar network connectivity (with timeout) */
+/** Check 4 — CORS configuration safety */
+function checkCorsConfig() {
+  const nodeEnv = process.env.NODE_ENV || 'development';
+  const allowAll = process.env.CORS_ALLOW_ALL === 'true';
+  const allowedOrigins = process.env.CORS_ALLOWED_ORIGINS || '';
+
+  // Hard error: wildcard CORS in production is forbidden
+  if (allowAll && nodeEnv === 'production') {
+    fail(
+      'CORS',
+      'CORS_ALLOW_ALL=true is set in production — this allows all origins and must not be used in production. ' +
+      'Set CORS_ALLOWED_ORIGINS to an explicit allowlist and remove CORS_ALLOW_ALL.'
+    );
+    return false;
+  }
+
+  // Warning: no allowlist configured outside pure local development
+  if (!allowedOrigins.trim() && nodeEnv !== 'development') {
+    warn(
+      'CORS',
+      'CORS_ALLOWED_ORIGINS is not set and NODE_ENV is not "development". ' +
+      'All cross-origin requests will be rejected. ' +
+      'Set CORS_ALLOWED_ORIGINS to a comma-separated list of allowed origins.'
+    );
+  } else if (!allowedOrigins.trim() && nodeEnv === 'development' && !allowAll) {
+    pass('CORS', 'development mode — localhost origins allowed by default');
+  } else if (allowAll && nodeEnv === 'development') {
+    warn('CORS', 'CORS_ALLOW_ALL=true in development — all origins are permitted (acceptable for local dev only)');
+  } else {
+    const count = allowedOrigins.split(',').map(o => o.trim()).filter(Boolean).length;
+    pass('CORS', `CORS_ALLOWED_ORIGINS configured (${count} origin(s))`);
+  }
+
+  return true;
+}
+
+/** Check 5 — Stellar network connectivity (with timeout) */
 async function checkStellarNetwork() {
   try {
     const serviceContainer = require('../config/serviceContainer');
@@ -113,6 +151,51 @@ async function checkStellarNetwork() {
   }
 }
 
+/** Check 5 — Database file and directory permissions (Issue #890) */
+function checkDatabasePermissions() {
+  const DATA_DIR = './data';
+  const DB_PATH = path.join(DATA_DIR, 'stellar_donations.db');
+
+  try {
+    // Check data directory permissions
+    if (fs.existsSync(DATA_DIR)) {
+      const dirStats = fs.statSync(DATA_DIR);
+      const dirMode = dirStats.mode & parseInt('777', 8);
+      
+      if (dirMode !== parseInt('700', 8)) {
+        warn(
+          'Database directory permissions',
+          `${DATA_DIR} has permissions ${(dirMode).toString(8)} (should be 700). ` +
+          'Run: chmod 700 data'
+        );
+      } else {
+        pass('Database directory permissions', `${DATA_DIR} is 0700 (owner only)`);
+      }
+    }
+
+    // Check database file permissions
+    if (fs.existsSync(DB_PATH)) {
+      const fileStats = fs.statSync(DB_PATH);
+      const fileMode = fileStats.mode & parseInt('777', 8);
+      
+      if (fileMode !== parseInt('600', 8)) {
+        warn(
+          'Database file permissions',
+          `${DB_PATH} has permissions ${(fileMode).toString(8)} (should be 600). ` +
+          'Run: chmod 600 data/stellar_donations.db'
+        );
+      } else {
+        pass('Database file permissions', `${DB_PATH} is 0600 (owner only)`);
+      }
+    }
+
+    return true;
+  } catch (err) {
+    warn('Database permissions check', err.message);
+    return true; // Don't fail on permission check errors
+  }
+}
+
 /**
  * Run all startup checks.
  *
@@ -123,11 +206,20 @@ async function checkStellarNetwork() {
 async function run({ exitOnFailure = false } = {}) {
   console.log('\nRunning startup checks…\n');
 
+  // CORS safety check runs first — a production misconfiguration is a hard failure
+  const corsOk = checkCorsConfig();
+  if (!corsOk && exitOnFailure) {
+    console.error('\nStartup checks FAILED ✖ (CORS misconfiguration in production)\n');
+    process.exit(1);
+  }
+
   const criticalResults = [
+    corsOk,
     checkEncryptionKey(),
     checkApiKeys(),
     await checkDatabase(),
     await checkStellarNetwork(),
+    checkDatabasePermissions(),
   ];
 
   const passed = criticalResults.every(Boolean);

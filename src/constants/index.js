@@ -28,13 +28,12 @@ const DONATION_FREQUENCIES = Object.freeze({
 });
 
 /**
- * Valid frequencies array for validation
+ * Valid frequencies array for validation (Issue #888: only daily, weekly, monthly)
  */
 const VALID_FREQUENCIES = Object.freeze([
   DONATION_FREQUENCIES.DAILY,
   DONATION_FREQUENCIES.WEEKLY,
   DONATION_FREQUENCIES.MONTHLY,
-  DONATION_FREQUENCIES.CUSTOM,
 ]);
 
 /**

@@ -256,6 +256,7 @@ async function validateApiKey(rawKey) {
     quotaUsed: row.quota_used || 0,
     quotaResetAt: row.quota_reset_at,
     notificationEmail: row.notification_email || null,
+    rateLimitPerMinute: row.rate_limit_per_minute || null,
   };
 
   setCachedKey(keyHash, result);

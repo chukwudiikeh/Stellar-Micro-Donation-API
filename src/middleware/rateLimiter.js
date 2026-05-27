@@ -33,6 +33,12 @@ const AuditLogService = require('../services/AuditLogService');
 const donationRateLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
+  keyGenerator: (req) => {
+    if (req.apiKey && req.apiKey.id && !req.apiKey.isLegacy) {
+      return `key:${req.apiKey.id}`;
+    }
+    return `ip:${req.ip}`;
+  },
   message: {
     success: false,
     error: {
@@ -358,6 +364,37 @@ const authRefreshRateLimiter = rateLimit({
   }
 });
 
+/**
+ * Health Check Limiter (Issue #889)
+ * Intent: Prevent reconnaissance attacks via continuous health endpoint polling
+ * Scope: GET /health, GET /api/v1/health
+ * 
+ * Flow & Configuration:
+ * 1. Window: 60-second sliding window
+ * 2. Threshold: Max 60 requests per IP (1 per second)
+ * 3. Headers: X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset
+ * 4. Exhaustion: Responds with HTTP 429
+ */
+const healthCheckRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  keyGenerator: (req) => req.ip,
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: false,
+  handler: (req, res) => {
+    const retryAfter = req.rateLimit?.resetTime
+      ? Math.ceil((new Date(req.rateLimit.resetTime) - Date.now()) / 1000)
+      : 60;
+
+    res.set('Retry-After', String(retryAfter));
+    res.status(429).json({
+      status: 'degraded',
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
 module.exports = {
   donationRateLimiter,
   verificationRateLimiter,
@@ -365,6 +402,7 @@ module.exports = {
   bulkImportRateLimiter,
   authTokenRateLimiter,
   authRefreshRateLimiter,
+  healthCheckRateLimiter,
   createRateLimiter,
   friendbotRateLimiter: rateLimit({
     windowMs: 60 * 1000,

@@ -626,6 +626,7 @@ class DonationService {
     memoEnvelope = null,
     encryptionMetadata = null,
     sdgCategories = [],
+    correlationId = null,
   }) {
     // Sanitize identifiers
     const rawDonor = donor ? sanitizeIdentifier(donor) : 'Anonymous';
@@ -725,6 +726,11 @@ class DonationService {
 
     if (sourceSecret && sanitizedRecipient) {
       if (!sourceAssetProvided) {
+        // Set correlation ID on StellarService for this request
+        if (correlationId) {
+          this.stellarService.setCorrelationId(correlationId);
+        }
+        
         stellarResult = await this.stellarService.sendDonation({
           sourceSecret,
           destinationPublic: sanitizedRecipient,
@@ -736,6 +742,11 @@ class DonationService {
         });
         paymentMethod = 'direct';
       } else {
+        // Set correlation ID on StellarService for this request
+        if (correlationId) {
+          this.stellarService.setCorrelationId(correlationId);
+        }
+        
         const estimate = await this.stellarService.discoverBestPath({
           sourceAsset: normalizedSourceAsset,
           sourceAmount: normalizedSourceAmount.toString(),
@@ -1319,8 +1330,14 @@ class DonationService {
     const sortBy = filters.sortBy || 'timestamp';
     const order = filters.order || 'desc';
     const useCustomSort = sortBy !== 'timestamp' || order !== 'desc';
+    
+    // Get all transactions and apply filters
     const filteredTransactions = this.applyFilters(Transaction.getAll(), filters);
+    
+    // Get total count before pagination
+    const totalCount = filteredTransactions.length;
 
+    // Use cursor-based pagination with proper database semantics
     let result = paginateCollection(filteredTransactions, {
       ...pagination,
       timestampField: 'timestamp',
@@ -1343,6 +1360,7 @@ class DonationService {
 
     return {
       ...result,
+      totalCount,
       appliedFilters,
       resultCount: result.totalCount,
     };

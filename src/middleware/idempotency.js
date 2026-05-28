@@ -130,10 +130,62 @@ async function optionalIdempotency(req, res, next) {
   const idempotencyKey = req.headers['idempotency-key'] || req.headers['x-idempotency-key'];
 
   if (!idempotencyKey) {
+    req.idempotency = { key: null, isNew: false };
     return next();
   }
 
   return requireIdempotency(req, res, next);
+}
+
+/**
+ * Conditional Idempotency Handler for POST /donations.
+ * When REQUIRE_IDEMPOTENCY_KEY=true, the Idempotency-Key header is required.
+ * When REQUIRE_IDEMPOTENCY_KEY=false (default), it is optional.
+ * The key must be a non-empty string of 1–128 characters.
+ */
+async function conditionalIdempotency(req, res, next) {
+  const required = process.env.REQUIRE_IDEMPOTENCY_KEY === 'true';
+  const idempotencyKey = req.headers['idempotency-key']
+    || req.headers['x-idempotency-key']
+    || req.idempotency?.key;
+
+  if (!idempotencyKey) {
+    if (required) {
+      return next(new ValidationError(
+        'An Idempotency-Key header is required for donation creation',
+        { header: 'Idempotency-Key' },
+        'IDEMPOTENCY_KEY_REQUIRED'
+      ));
+    }
+    req.idempotency = { key: null, isNew: false };
+    return next();
+  }
+
+  if (typeof idempotencyKey !== 'string' || idempotencyKey.length < 1 || idempotencyKey.length > 128) {
+    return next(new ValidationError(
+      'Idempotency-Key must be a non-empty string of 1–128 characters',
+      { idempotencyKey },
+      'INVALID_IDEMPOTENCY_KEY'
+    ));
+  }
+
+  try {
+    const apiKeyId = req.apiKey?.id || null;
+    const existing = await IdempotencyService.get(idempotencyKey, apiKeyId);
+    if (existing) {
+      log.info('IDEMPOTENCY', 'Returning cached response', { idempotencyKey, apiKeyId });
+      return res.status(200).json({
+        ...existing.response,
+        _idempotent: true,
+        _originalTimestamp: existing.createdAt,
+      });
+    }
+    const requestHash = IdempotencyService.generateRequestHash(req.body);
+    req.idempotency = { key: idempotencyKey, hash: requestHash, isNew: true, apiKeyId };
+    next();
+  } catch (error) {
+    next(error);
+  }
 }
 
 /**
@@ -155,6 +207,7 @@ async function cleanupExpiredKeys() {
 module.exports = {
   requireIdempotency,
   optionalIdempotency,
+  conditionalIdempotency,
   storeIdempotencyResponse,
   cleanupExpiredKeys
 };

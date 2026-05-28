@@ -39,12 +39,14 @@ const { withSpanInContext, extractTraceContext, injectTraceHeaders, getCurrentTr
 class RecurringDonationScheduler {
   /**
    * @param {Object} stellarService - StellarService or MockStellarService instance
+   * @param {Object} [networkStatusService] - Optional NetworkStatusService for health checks
    */
-  constructor(stellarService) {
+  constructor(stellarService, networkStatusService = null) {
     if (!stellarService) {
       throw new Error('stellarService is required');
     }
     this.stellarService = stellarService;
+    this.networkStatusService = networkStatusService;
     this.intervalId = null;
     this.isRunning = false;
 
@@ -215,6 +217,13 @@ class RecurringDonationScheduler {
    */
   async processSchedules() {
     if (!this.isRunning) {
+      return;
+    }
+
+    // Skip tick when Stellar network is degraded
+    if (this.networkStatusService && !this.networkStatusService.isHealthy()) {
+      log.warn('RECURRING_SCHEDULER', 'Scheduler tick skipped: Stellar network is degraded. due donations will be retried on next tick.');
+      recurringDonationsSkippedTotal.inc({ reason: 'network_degraded' }, 1);
       return;
     }
 

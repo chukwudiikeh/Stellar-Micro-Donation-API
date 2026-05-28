@@ -174,7 +174,7 @@
 const express = require('express');
 const router = express.Router();
 const requireApiKey = require('../middleware/apiKey');
-const { requireIdempotency, storeIdempotencyResponse } = require('../middleware/idempotency');
+const { requireIdempotency, conditionalIdempotency, storeIdempotencyResponse } = require('../middleware/idempotency');
 const { checkPermission } = require('../middleware/rbac');
 const { PERMISSIONS } = require('../utils/permissions');
 const { ValidationError, ERROR_CODES } = require('../utils/errors');
@@ -815,7 +815,7 @@ async function withDonorLock(donorId, fn) {
   }
 }
 
-router.post('/', donationRateLimiter, checkPermission(PERMISSIONS.DONATIONS_CREATE), requireIdempotency, payloadSizeLimiter(ENDPOINT_LIMITS.singleDonation), asyncHandler(async (req, res, next) => {
+router.post('/', donationRateLimiter, checkPermission(PERMISSIONS.DONATIONS_CREATE), conditionalIdempotency, payloadSizeLimiter(ENDPOINT_LIMITS.singleDonation), asyncHandler(async (req, res, next) => {
   try {
     const { senderId, receiverId, amount, memo } = req.body;
 

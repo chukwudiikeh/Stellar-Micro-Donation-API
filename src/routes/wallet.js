@@ -33,9 +33,7 @@ const { parseCursorPaginationQuery } = require('../utils/pagination');
 
 const walletService = new WalletService();
 
-function getStellarService() {
-  return require('../config/serviceContainer').getStellarService();
-}
+const { getStellarService } = require('../config/stellar');
 
 const requireAuth = requireAdmin;
 const requirePermission = (perm) => checkPermission(perm);
@@ -1286,17 +1284,6 @@ router.post('/:id/merge', checkPermission(PERMISSIONS.WALLETS_DELETE), payloadSi
 
     // ── Execute merge on Stellar ─────────────────────────────────────────────
     const stellarService = getStellarService();
-
-    // Pre-merge eligibility check
-    const eligibility = await stellarService.validateMergeEligibility(sourceWallet.publicKey);
-    if (!eligibility.eligible) {
-      return res.status(400).json({
-        success: false,
-        error: 'Account is not eligible for merge',
-        data: { blockers: eligibility.blockers }
-      });
-    }
-
     const mergeResult = await stellarService.mergeAccount(sourceSecret, destinationPublicKey);
 
     // ── Soft-delete source wallet ────────────────────────────────────────────

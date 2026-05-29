@@ -183,6 +183,7 @@ const { donationRateLimiter, verificationRateLimiter, batchRateLimiter } = requi
 const perKeyRateLimit = require('../middleware/perKeyRateLimit');
 const { validateRequiredFields, validateFloat, validateInteger } = require('../utils/validationHelpers');
 const { validateSchema } = require('../middleware/schemaValidation');
+const { validateDateRange } = require('../middleware/validation');
 const { TRANSACTION_STATES } = require('../utils/transactionStateMachine');
 const { parseCursorPaginationQuery } = require('../utils/pagination');
 const { payloadSizeLimiter, ENDPOINT_LIMITS } = require('../middleware/payloadSizeLimiter');
@@ -192,12 +193,22 @@ const asyncHandler = require('../utils/asyncHandler');
 const { getStellarService } = require('../config/stellar');
 const config = require('../config');
 const DonationService = require('../services/DonationService');
+const StatsService = require('../services/StatsService');
 const { calculateCostBreakdown } = require('../utils/costBreakdown');
 const LimitService = require('../services/LimitService');
 
 const Transaction = require('./models/transaction');
 const donationValidator = require('../utils/donationValidator');
 const { buildErrorResponse } = require('../utils/validationErrorFormatter');
+
+const statsByTagQuerySchema = validateSchema({
+  query: {
+    fields: {
+      startDate: { type: 'dateString', required: true },
+      endDate: { type: 'dateString', required: true },
+    },
+  },
+});
 const donationEvents = require('../events/donationEvents');
 const { isValidStellarPublicKey } = require('../utils/validators');
 
@@ -2451,6 +2462,34 @@ router.get('/stats/by-campaign', checkPermission(PERMISSIONS.STATS_READ), asyncH
       limit: parsedLimit,
       offset: parsedOffset,
       generatedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    next(error);
+  }
+}));
+
+/**
+ * GET /donations/stats/by-tag
+ * Aggregate donation statistics per tag.
+ * Query params: startDate, endDate (ISO format)
+ */
+router.get('/stats/by-tag', checkPermission(PERMISSIONS.STATS_READ), statsByTagQuerySchema, validateDateRange, asyncHandler(async (req, res, next) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    const data = StatsService.getTagStats(start, end);
+
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    return res.json({
+      success: true,
+      data,
+      metadata: {
+        startDate: start.toISOString(),
+        endDate: end.toISOString(),
+        totalTags: data.length,
+        generatedAt: new Date().toISOString()
+      }
     });
   } catch (error) {
     next(error);

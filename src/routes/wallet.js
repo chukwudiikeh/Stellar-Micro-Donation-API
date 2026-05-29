@@ -1859,4 +1859,89 @@ router.post('/:id/fund', requireApiKey, checkPermission(PERMISSIONS.WALLETS_UPDA
   }
 }));
 
+const Cache = require('../utils/cache');
+const WALLET_ANALYTICS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * GET /wallets/:id/analytics
+ * Returns aggregated donation analytics for a wallet (by DB id).
+ * Requires wallets:read permission. Cached for 5 minutes.
+ */
+router.get('/:id/analytics', checkPermission(PERMISSIONS.WALLETS_READ), walletIdSchema, asyncHandler(async (req, res) => {
+  const walletId = parseInt(req.params.id, 10);
+
+  const wallet = await Database.get('SELECT id FROM users WHERE id = ?', [walletId]);
+  if (!wallet) {
+    return res.status(404).json({ success: false, error: { code: 'WALLET_NOT_FOUND', message: 'Wallet not found' } });
+  }
+
+  const cacheKey = `wallet:analytics:${walletId}`;
+  const cached = Cache.get(cacheKey);
+  if (cached) return res.json(cached);
+
+  const [outRows, inRows] = await Promise.all([
+    Database.query('SELECT amount, receiverId, timestamp FROM transactions WHERE senderId = ?', [walletId]),
+    Database.query('SELECT amount, senderId, timestamp FROM transactions WHERE receiverId = ?', [walletId]),
+  ]);
+
+  // Aggregate outgoing (donor)
+  const totalDonated = outRows.reduce((s, r) => s + r.amount, 0);
+  const donationCount = outRows.length;
+  const averageDonationAmount = donationCount > 0 ? totalDonated / donationCount : 0;
+  const largestDonation = donationCount > 0 ? Math.max(...outRows.map(r => r.amount)) : 0;
+
+  // Top 5 recipients
+  const recipientTotals = {};
+  for (const r of outRows) {
+    recipientTotals[r.receiverId] = (recipientTotals[r.receiverId] || 0) + r.amount;
+  }
+  const topRecipients = Object.entries(recipientTotals)
+    .sort((a, b) => b[1] - a[1]).slice(0, 5)
+    .map(([id, total]) => ({ walletId: Number(id), total }));
+
+  // Aggregate incoming (recipient)
+  const totalReceived = inRows.reduce((s, r) => s + r.amount, 0);
+  const receiptCount = inRows.length;
+
+  // Top 5 donors
+  const donorTotals = {};
+  for (const r of inRows) {
+    donorTotals[r.senderId] = (donorTotals[r.senderId] || 0) + r.amount;
+  }
+  const topDonors = Object.entries(donorTotals)
+    .sort((a, b) => b[1] - a[1]).slice(0, 5)
+    .map(([id, total]) => ({ walletId: Number(id), total }));
+
+  // Donations by month (last 12 months) — outgoing
+  const now = new Date();
+  const donationsByMonth = [];
+  for (let i = 11; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const month = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    const monthRows = outRows.filter(r => {
+      const t = new Date(r.timestamp);
+      return t.getFullYear() === d.getFullYear() && t.getMonth() === d.getMonth();
+    });
+    donationsByMonth.push({ month, amount: monthRows.reduce((s, r) => s + r.amount, 0), count: monthRows.length });
+  }
+
+  // First/last donation timestamps
+  const allTimestamps = outRows.map(r => r.timestamp).filter(Boolean).sort();
+  const firstDonationAt = allTimestamps.length > 0 ? allTimestamps[0] : null;
+  const lastDonationAt = allTimestamps.length > 0 ? allTimestamps[allTimestamps.length - 1] : null;
+
+  const body = {
+    success: true,
+    data: {
+      totalDonated, totalReceived, donationCount, receiptCount,
+      averageDonationAmount, largestDonation,
+      topRecipients, topDonors, donationsByMonth,
+      firstDonationAt, lastDonationAt,
+    },
+  };
+
+  Cache.set(cacheKey, body, WALLET_ANALYTICS_CACHE_TTL_MS);
+  return res.json(body);
+}));
+
 module.exports = router;

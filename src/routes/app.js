@@ -27,6 +27,7 @@ const transactionRoutes = require('./transaction');
 const apiKeysRoutes = require('./apiKeys');
 const apiKeyUsageRoutes = require('./apiKeyUsage');
 const recurringDonationRoutes = require('./recurringDonation');
+const disputesRoutes = require('./disputes');
 const channelRoutes = require('./channels');
 const assetRoutes = require('./assets');
 const feesRoutes = require('./fees');
@@ -262,6 +263,7 @@ apiV1.use('/wallets', thresholdsRouter);
 apiV1.use('/', recoveryRoutes);
 apiV1.use('/donations', donationRoutes);
 apiV1.use('/donations', require('./receipt'));
+apiV1.use('/donations', disputesRoutes);
 apiV1.use('/donations/recurring', recurringDonationRoutes);
 apiV1.use('/assets', assetRoutes);
 apiV1.use('/stats', statsRoutes);
@@ -495,6 +497,9 @@ app.get('/suspicious-patterns', require('../middleware/rbac').requireAdmin(), (r
 
 // Data retention admin endpoints (admin only)
 app.use('/admin/retention', retentionAdminRoutes);
+
+// Disputes admin endpoints (admin only)
+app.use('/admin/disputes', disputesRoutes);
 
 // Geo-rules management (admin only)
 app.use('/admin/geo-rules', geoRulesAdminRoutes);

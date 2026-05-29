@@ -192,4 +192,65 @@ router.get('/stats', dbStatsRateLimiter, checkPermission(PERMISSIONS.ADMIN_ALL),
   }
 });
 
+// In-memory vacuum job store
+const vacuumJobs = new Map();
+let activeVacuumJobId = null;
+
+/**
+ * POST /admin/db/vacuum
+ * Starts a background VACUUM job. Returns immediately with a jobId.
+ * Only one vacuum job may run at a time.
+ */
+router.post('/vacuum', checkPermission(PERMISSIONS.ADMIN_ALL), async (req, res) => {
+  if (activeVacuumJobId && vacuumJobs.get(activeVacuumJobId)?.status === 'running') {
+    return res.status(409).json({ success: false, error: { code: 'VACUUM_IN_PROGRESS', message: 'A vacuum job is already running' } });
+  }
+
+  const jobId = `vacuum-${Date.now()}`;
+  activeVacuumJobId = jobId;
+  vacuumJobs.set(jobId, { status: 'running', startedAt: Date.now() });
+
+  // Run in background
+  setImmediate(async () => {
+    const job = vacuumJobs.get(jobId);
+    try {
+      const dbPath = process.env.DB_PATH || path.join(__dirname, '../../../data/stellar_donations.db');
+      let sizeBefore = 0;
+      try { sizeBefore = fs.statSync(dbPath).size; } catch (_) {}
+
+      await Database.run('PRAGMA wal_checkpoint(FULL)');
+      await Database.run('VACUUM');
+
+      let sizeAfter = 0;
+      try { sizeAfter = fs.statSync(dbPath).size; } catch (_) {}
+
+      job.status = 'completed';
+      job.sizeBefore = sizeBefore;
+      job.sizeAfter = sizeAfter;
+      job.reclaimedBytes = sizeBefore - sizeAfter;
+      job.durationMs = Date.now() - job.startedAt;
+    } catch (err) {
+      job.status = 'failed';
+      job.error = err.message;
+      job.durationMs = Date.now() - job.startedAt;
+    } finally {
+      activeVacuumJobId = null;
+    }
+  });
+
+  res.json({ success: true, jobId });
+});
+
+/**
+ * GET /admin/db/vacuum/:jobId
+ * Returns the status of a vacuum job.
+ */
+router.get('/vacuum/:jobId', checkPermission(PERMISSIONS.ADMIN_ALL), (req, res) => {
+  const job = vacuumJobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ success: false, error: { code: 'JOB_NOT_FOUND', message: 'Vacuum job not found' } });
+  }
+  res.json({ success: true, data: { jobId: req.params.jobId, ...job } });
+});
+
 module.exports = router;

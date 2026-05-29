@@ -492,6 +492,9 @@ app.get('/suspicious-patterns', require('../middleware/rbac').requireAdmin(), (r
   });
 });
 
+// Database admin endpoints (admin only) — Issue #70
+app.use('/admin/db', dbAdminRoutes);
+
 // Data retention admin endpoints (admin only)
 app.use('/admin/retention', retentionAdminRoutes);
 
